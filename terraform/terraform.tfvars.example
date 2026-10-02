@@ -1,0 +1,13 @@
+# Kopieren nach terraform.tfvars und Werte anpassen.
+
+subscription_id = "00000000-0000-0000-0000-000000000000"
+
+# Eigene öffentliche IP-Adresse(n) für Web-Oberfläche und SSH, als CIDR
+admin_ip = ["203.0.113.10/32"]
+
+# Inhalt der eigenen .pub-Datei
+admin_ssh_public_key = "ssh-ed25519 AAAA... user@host"
+
+# Login für die wg-easy Web-Oberfläche. Passwort ohne "$"-Zeichen.
+wg_admin_username      = "wgadmin"
+wg_admin_password_seed = "BitteAendern123!"

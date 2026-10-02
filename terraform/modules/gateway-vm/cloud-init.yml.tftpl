@@ -1,0 +1,97 @@
+#cloud-config
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - ca-certificates
+  - curl
+  - gnupg
+
+write_files:
+  # wg-easy als Container mit Admin-Login ohne Setup-Assistent
+  - path: /opt/wg-easy/docker-compose.yml
+    permissions: "0644"
+    content: |
+      services:
+        wg-easy:
+          environment:
+            - WG_HOST=${wg_host}
+            - PORT=51821
+            - WG_PORT=51820
+            - INIT_ENABLED=true
+            - INIT_USERNAME=${wg_admin_username}
+            - INIT_PASSWORD=${wg_admin_password}
+            - INIT_HOST=${wg_host}
+            - INIT_PORT=51820
+            # Login ohne HTTPS da kein Zertifikat vorhanden ist
+            - INSECURE=true
+          image: ghcr.io/wg-easy/wg-easy:15
+          container_name: wg-easy
+          networks:
+            wg:
+              ipv4_address: 10.42.42.42
+          volumes:
+            - /opt/wg-easy/etc_wireguard:/etc/wireguard
+            - /lib/modules:/lib/modules:ro
+          ports:
+            - "51820:51820/udp"
+            - "51821:51821/tcp"
+          restart: unless-stopped
+          cap_add:
+            - NET_ADMIN
+            - SYS_MODULE
+          sysctls:
+            - net.ipv4.ip_forward=1
+            - net.ipv4.conf.all.src_valid_mark=1
+
+      networks:
+        wg:
+          driver: bridge
+          ipam:
+            driver: default
+            config:
+              - subnet: 10.42.42.0/24
+                gateway: 10.42.42.1
+
+  # Sync der Datenbank mit Upload auf VM1 und Download auf VM2
+  - path: /opt/wg-easy/sync.sh
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      set -e
+      az login --identity -o none
+      %{ if sync_role == "push" }
+      az storage blob upload --account-name ${storage_account_name} --container-name ${storage_container_name} --name wg-easy.db --file /opt/wg-easy/etc_wireguard/wg-easy.db --auth-mode login --overwrite -o none
+      %{ else }
+      az storage blob download --account-name ${storage_account_name} --container-name ${storage_container_name} --name wg-easy.db --file /opt/wg-easy/etc_wireguard/wg-easy.db --auth-mode login -o none
+      docker compose -f /opt/wg-easy/docker-compose.yml restart
+      %{ endif }
+
+runcmd:
+  # Docker aus dem offiziellen Docker-Repository installieren
+  - install -m 0755 -d /etc/apt/keyrings
+  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  - chmod a+r /etc/apt/keyrings/docker.asc
+  - echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list
+  # Warten bis unattended-upgrades den Paketmanager freigibt
+  - |
+    wait_for_apt() {
+      for i in $(seq 1 60); do
+        if fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
+          sleep 5
+        else
+          break
+        fi
+      done
+    }
+    wait_for_apt
+    apt-get update -y
+    wait_for_apt
+    apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+  - mkdir -p /opt/wg-easy/etc_wireguard
+  - cd /opt/wg-easy && docker compose up -d
+  # Azure CLI für den Blob-Zugriff und Sync alle 5 Minuten per Cronjob
+  - curl -sL https://aka.ms/InstallAzureCLIDeb | bash
+  - echo "*/5 * * * * root /opt/wg-easy/sync.sh >> /var/log/wg-sync.log 2>&1" > /etc/cron.d/wg-sync
+  - chmod 0644 /etc/cron.d/wg-sync
